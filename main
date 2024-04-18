@@ -1,0 +1,583 @@
+# Основа для модели нейронной сети
+from tensorflow.keras.models import Model
+
+# Стандартные слои keras
+from tensorflow.keras.layers import Input, Conv2DTranspose, concatenate, Activation, MaxPooling2D, Conv2D, BatchNormalization, Dropout
+
+# Оптимизатор Adam
+from tensorflow.keras.optimizers import Adam
+
+# Дополнительные утилиты keras
+from tensorflow.keras import utils
+
+# Инструменты для построения графиков
+import matplotlib.pyplot as plt
+
+# Инструменты для работы с изображениями
+from tensorflow.keras.preprocessing import image
+
+# Инструменты для работы с массивами
+import numpy as np
+
+# Системные инструменты
+import time, random, gdown, os
+
+# Дополнительные инструменты для работы с изображениями
+from PIL import Image
+
+# Дополнительные инструменты визуализации
+import seaborn as sns
+sns.set_style('darkgrid')
+
+# функции для детализации и управления процессом обучения
+from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping, ModelCheckpoint
+
+# бэкенд Keras
+import tensorflow.keras.backend as K
+
+import torch
+from torchvision import ops
+from keras.utils import normalize
+
+# Рисование схемы модели
+from tensorflow.keras.utils import plot_model
+
+import matplotlib.patches as patches
+
+# Импорт алгоритмов кластеризации
+from sklearn.cluster import KMeans
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Исходные данные
+
+# Путь к папке с обрабатываемыми изображениями:
+path='https://drive.google.com/uc?id=1ESZsIr81vEyq1pu3355LttuyuBBenMtQ'
+
+# Путь к файлу с весами модели
+weights_path='/content/drive/MyDrive/Diplom/misheni_jakard_rasshir.h5'
+
+# Глобальные параметры
+
+IMG_WIDTH = 208               # Ширина картинки
+IMG_HEIGHT = 208              # Высота картинки
+IMG_CHANNELS = 3              # Количество каналов изображения
+CLASS_COUNT = 2               # Количество классов на изображении
+TRAIN_DIRECTORY = 'targets2/train'     # Название папки с файлами обучающей выборки
+VAL_DIRECTORY = 'targets2/val'         # Название папки с файлами проверочной выборки
+
+# Цвета пикселов сегментированных изображений
+
+PROBOINA = (255, 255, 255)      # Пробоина (белый)
+BACKGROUND = (0, 0, 0)          # Фон (черный)
+
+# Метки классов
+CLASS_LABELS = (PROBOINA, BACKGROUND)
+
+# learning rate
+LR = 0.001
+
+#Загрузка датасета
+
+# Служебная функция загрузки выборки изображений из файлов в папке
+
+def load_imageset(folder,   # имя папки
+                  subset,   # подмножество изображений - оригинальные или сегментированные
+                  title,     # имя выборки
+                  IMG_WIDTH=208, IMG_HEIGHT=208 # размеры изображений
+                  ):
+
+    # Cписок для хранения изображений выборки
+    image_list = []
+
+    # Отметка текущего времени
+    cur_time = time.time()
+
+    # Для всех файлов в каталоге по указанному пути:
+    for filename in sorted(os.listdir(f'{folder}/{subset}')):
+
+        # Чтение очередной картинки и добавление ее в список изображений требуемого размера
+        image_list.append(image.load_img(os.path.join(f'{folder}/{subset}', filename),
+                                         target_size=(IMG_WIDTH, IMG_HEIGHT)))
+
+    # Вывод времени загрузки картинок выборки
+    print('{} выборка загружена. Время загрузки: {:.2f} с'.format(title,
+                                                                  time.time() - cur_time))
+
+    # Вывод количества элементов в выборке
+    print('Количество изображений:', len(image_list))
+
+    return image_list
+# Функция загрузки и распаковки данных
+def download_func(path='https://drive.google.com/uc?id=1ESZsIr81vEyq1pu3355LttuyuBBenMtQ'):
+
+  # Скачиваем датасет с изображениями для тестирования модели
+
+  gdown.download(path, None, quiet=True)
+
+  # Распаковываем датасет
+  !unzip -qo targets2.zip
+
+  # Загрузка входных изображений
+
+  train_images = load_imageset(TRAIN_DIRECTORY, 'original', 'Обучающая', IMG_WIDTH, IMG_HEIGHT)
+  val_images = load_imageset(VAL_DIRECTORY, 'original', 'Проверочная', IMG_WIDTH, IMG_HEIGHT)
+
+  # Загрузка выходных (сегментированных) изображений
+
+  train_segments = load_imageset(TRAIN_DIRECTORY, 'segment', 'Обучающая', IMG_WIDTH, IMG_HEIGHT)
+  val_segments = load_imageset(VAL_DIRECTORY, 'segment', 'Проверочная', IMG_WIDTH, IMG_HEIGHT)
+
+  return train_images, val_images, train_segments, val_segments
+
+# Функция для просмотра изображений из набора
+
+def show_imageset(image_list,  # выборка изображений
+                  n            # количество картинок для просмотра
+                  ):
+
+    fig, axs = plt.subplots(1, n, figsize=(25, 10))       # Создание полотна из n графиков
+
+    # Вывод в цикле n случайных изображений
+    for i in range(n):
+        img = random.choice(image_list)                   # Выборка случайного фото для отображения
+        axs[i].axis('off')
+        axs[i].imshow(img)                                # Отображение картинки
+
+    plt.show()                                            # Отрисовка изображений
+
+#Создание выборки
+
+# Функция преобразования цветного сегментированного изображения в метки классов
+
+def rgb_to_labels(image_list,  # список цветных изображений
+                  CLASS_LABELS,
+                  IMG_WIDTH=208, IMG_HEIGHT=208,
+                 ):
+
+    result = []
+
+    # Для всех картинок в списке:
+    for d in image_list:
+        sample = np.array(d)
+        # Создание пустой 1-канальной картики
+        y = np.zeros((IMG_WIDTH, IMG_HEIGHT, 1), dtype='uint8')
+
+        # По всем классам:
+        for i, cl in enumerate(CLASS_LABELS):
+            # Нахождение 3-х канальных пикселей классов и занесение метки класса
+            y[np.where(np.all(sample == CLASS_LABELS[i], axis=-1))] = i
+
+        result.append(y)
+
+    return np.array(result)
+
+# Функция преобразования тензора меток класса в цветное сегметрированное изображение
+
+def labels_to_rgb(image_list,  # список одноканальных изображений
+                  CLASS_LABELS,
+                  IMG_WIDTH=208, IMG_HEIGHT=208,
+                 ):
+
+    result = []
+
+    # Для всех картинок в списке:
+    for y in image_list:
+        # Создание пустой цветной картики
+        temp = np.zeros((IMG_WIDTH, IMG_HEIGHT, 3), dtype='uint8')
+
+        # По всем классам:
+        for i, cl in enumerate(CLASS_LABELS):
+            # Нахождение пикселов класса и заполнение цветом из CLASS_LABELS[i]
+            temp[np.where(np.all(y==i, axis=-1))] = CLASS_LABELS[i]
+
+        result.append(temp)
+
+    return np.array(result)
+
+# Функция преобразования тензора меток класса в цветное сегметрированное изображение
+
+def labels_to_rgb2(image_list,  # список одноканальных изображений
+                  CLASS_LABELS,
+                  IMG_WIDTH=208, IMG_HEIGHT=208,
+                 ):
+
+    # Создание пустой цветной картики
+    temp = np.zeros((IMG_WIDTH, IMG_HEIGHT, 3), dtype='uint8')
+    for i, cl in enumerate(CLASS_LABELS):
+        # Нахождение пикселов класса и заполнение цветом из CLASS_LABELS[i]
+        temp[np.where(np.all(image_list==i, axis=-1))] = CLASS_LABELS[i]
+
+    result = np.array(temp)
+    return result
+
+# Формирование обучающей выборки
+def train_vyb(train_images, train_segments):
+  x_train = []                          # Cписок под обучающую выборку
+
+  for img in train_images:              # Для всех изображений выборки:
+      x = image.img_to_array(img)       # Перевод изображения в numpy-массив формы: высота x ширина x количество каналов
+      x_train.append(x)                 # Добавление элемента в x_train
+
+  x_train = np.array(x_train)           # Перевод всей выборки в numpy
+  print(x_train.shape)                  # Форма x_train
+
+  # Преобразование сегментов в метки классов
+  y_train = []
+  for img in train_segments:                # Для всех изображений выборки:
+      x = image.img_to_array(img.convert('L'))       # Перевод изображения в одноканальное и в numpy-массив
+      y_train.append(x)
+  y_train = np.array(y_train)
+  print(y_train.shape)
+
+  x_train = normalize(x_train)
+  y_train = (y_train) /255.
+
+  return x_train, y_train
+
+# Формирование проверочной выборки
+def test_vyb(val_images, val_segments):
+  x_val = []                            # Cписок под проверочную выборку
+
+  for img in val_images:                # Для всех изображений выборки:
+      x = image.img_to_array(img)       # Перевод изображения в numpy-массив формы: высота x ширина x количество каналов
+      x_val.append(x)                   # Добавление элемента в x_train
+
+  x_val = np.array(x_val)               # Перевод всей выборки в numpy
+  print(x_val.shape)                    # Форма x_train
+
+  # Преобразование сегментов в метки классов
+  y_val = []
+  for img in val_segments:                # Для всех изображений выборки:
+      x = image.img_to_array(img.convert('L'))       # Перевод изображения в одноканальное и в numpy-массив
+      y_val.append(x)
+  y_val = np.array(y_val)
+  print(y_val.shape)
+  # Нормализация
+  x_val = normalize(x_val)
+  y_val = (y_val) /255.
+
+  return x_val, y_val
+
+# Показатель качества распознавания (IoU) - Коэффициент Жаккара для метрики
+def jacard_coef(y_true, y_pred):
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (intersection + 1.0) / (K.sum(y_true_f) + K.sum(y_pred_f) - intersection + 1.0)
+    
+# Показатель качества распознавания (IoU) - Коэффициент Жаккара для loss
+def jacard_coef_loss(y_true, y_pred):
+    return -jacard_coef(y_true, y_pred)
+
+# Расширенная модель НС U-net
+def sequential_segmentation_net4(IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS   # форма входного изображения
+                                ):
+
+    inputs = Input((IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS))
+    s = inputs
+
+    # Block 1
+    x = Conv2D(64, (3, 3), padding='same', name='block1_conv1')(s)      # Добавляем Conv2D-слой с 64-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(64, (3, 3), padding='same', name='block1_conv2')(x)      # Добавляем Conv2D-слой с 64-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    block_1_out = Activation('relu')(x)                                 # Добавляем слой Activation и запоминаем в переменной block_1_out
+
+    block_1_out_mask = Conv2D(64, (1, 1), padding='same')(block_1_out)  # Добавляем Conv2D-маску к текущему слою и запоминаем в переменную block_1_out_mask
+
+    x = MaxPooling2D()(block_1_out) # Добавляем слой MaxPooling2D
+
+    # Block 2
+    x = Conv2D(128, (3, 3), padding='same', name='block2_conv1')(x)     # Добавляем Conv2D-слой с 128-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x) # Добавляем слой Activation
+
+    x = Conv2D(128, (3, 3), padding='same', name='block2_conv2')(x)     # Добавляем Conv2D-слой с 128-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    block_2_out = Activation('relu')(x)                                 # Добавляем слой Activation и запоминаем в переменной block_2_out
+
+    block_2_out_mask = Conv2D(128, (1, 1), padding='same')(block_2_out) # Добавляем Conv2D-маску к текущему слою и запоминаем в переменную block_2_out_mask
+
+    x = MaxPooling2D()(block_2_out)                                     # Добавляем слой MaxPooling2D
+
+    # Block 3
+    x = Conv2D(256, (3, 3), padding='same', name='block3_conv1')(x)     # Добавляем Conv2D-слой с 256-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(256, (3, 3), padding='same', name='block3_conv2')(x)     # Добавляем Conv2D-слой с 256-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(256, (3, 3), padding='same', name='block3_conv3')(x)     # Добавляем Conv2D-слой с 256-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    block_3_out = Activation('relu')(x)                                 # Добавляем слой Activation и запоминаем в переменной block_3_out
+
+    block_3_out_mask = Conv2D(256, (1, 1), padding='same')(block_3_out) # Добавляем Conv2D-маску к текущему слою и запоминаем в переменную block_3_out_mask
+
+    x = MaxPooling2D()(block_3_out)                                     # Добавляем слой MaxPooling2D
+
+     # Block 4
+    x = Conv2D(512, (3, 3), padding='same', name='block4_conv1')(x)     # Добавляем Conv2D-слой с 512-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(512, (3, 3), padding='same', name='block4_conv2')(x)     # Добавляем Conv2D-слой с 256-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(512, (3, 3), padding='same', name='block4_conv3')(x)     # Добавляем Conv2D-слой с 256-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    block_4_out = Activation('relu')(x)                                 # Добавляем слой Activation и запоминаем в переменной block_4_out
+
+    block_4_out_mask = Conv2D(512, (1, 1), padding='same')(block_4_out) # Добавляем Conv2D-маску к текущему слою и запоминаем в переменную block_4_out_mask
+
+    x = MaxPooling2D()(block_4_out)                                     # Добавляем слой MaxPooling2D
+
+    # Block 5
+    x = Conv2D(512, (3, 3), padding='same', name='block5_conv1')(x)     # Добавляем Conv2D-слой с 512-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(512, (3, 3), padding='same', name='block5_conv2')(x)     # Добавляем Conv2D-слой с 512-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(512, (3, 3), padding='same', name='block5_conv3')(x)     # Добавляем Conv2D-слой с 512-нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    # UP 1
+    x = Conv2DTranspose(512, (2, 2), strides=(2, 2), padding='same')(x) # Добавляем слой Conv2DTranspose с 512 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = concatenate([x, block_4_out, block_4_out_mask])                 # Объединем текущий слой со слоем block_4_out и слоем-маской block_4_out_mask
+    x = Conv2D(512, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 512 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(512, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 512 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    # UP 2
+    x = Conv2DTranspose(256, (2, 2), strides=(2, 2), padding='same')(x) # Добавляем слой Conv2DTranspose с 256 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = concatenate([x, block_3_out, block_3_out_mask])                 # Объединем текущий слой со слоем block_3_out и слоем-маской block_3_out_mask
+    x = Conv2D(256, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 256 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(256, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 256 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    # UP 3
+    x = Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(x) # Добавляем слой Conv2DTranspose с 128 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = concatenate([x, block_2_out, block_2_out_mask])                 # Объединем текущий слой со слоем block_2_out и слоем-маской block_2_out_mask
+    x = Conv2D(128, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 128 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    x = Conv2D(128, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 128 нейронами
+    x = BatchNormalization()(x)                                         # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                           # Добавляем слой Activation
+
+    # UP 4
+    x = Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(x) # Добавляем слой Conv2DTranspose с 64 нейронами
+    x = BatchNormalization()(x)                                        # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                          # Добавляем слой Activation
+
+    x = concatenate([x, block_1_out, block_1_out_mask])                # Объединем текущий слой со слоем block_1_out и слоем-маской block_1_out_mask
+    x = Conv2D(64, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 128 нейронами
+    x = BatchNormalization()(x)                                        # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                          # Добавляем слой Activation
+
+    x = Conv2D(64, (3, 3), padding='same')(x)                          # Добавляем слой Conv2D с 128 нейронами
+    x = BatchNormalization()(x)                                        # Добавляем слой BatchNormalization
+    x = Activation('relu')(x)                                          # Добавляем слой Activation
+
+    x = Conv2D(1, (3, 3), activation='sigmoid', padding='same')(x) # Добавляем Conv2D-Слой с softmax-активацией на num_classes-нейронов
+
+    model = Model(s, x)                                            # Создаем модель с входом 'img_input' и выходом 'x'
+
+    # Компилируем модель
+    model.compile(optimizer=Adam(lr=1e-3),
+                  loss='binary_crossentropy',
+                  metrics=[jacard_coef])
+
+    return model                                                           # Возвращаем модель
+
+# Функция отображения графиков обучения модели
+def graph (history):
+  plt.figure(figsize=(14, 7))
+  plt.plot(history.history['jacard_coef'], label='Коэффициент Жаккара на обучающем наборе')
+  plt.plot(history.history['val_jacard_coef'], label='Коэффициент Жаккара на проверочном наборе')
+  plt.xlabel('Эпоха обучения')
+  plt.legend()
+  plt.show()
+
+def create_model (model, x_train, y_train, x_val, y_val, path_weight=None):
+  # Создание модели и вывод сводки по архитектуре
+
+  model_seq = model
+  model_seq.summary()
+
+  # загрузим веса
+  if path_weight!=None:
+    model_seq.load_weights(path_weight)
+  # Задаем Колбэки
+  earlystop=EarlyStopping(monitor='val_loss', mode='min', min_delta=0,patience=7,verbose=1,restore_best_weights=True)
+  model_Checkpoint = ModelCheckpoint(filepath=weights_path, monitor='val_loss', verbose=1, save_best_only=True,
+                                mode='min', baseline=0.5)
+  reduceLROnPlateau = ReduceLROnPlateau(monitor='val_loss', factor=0.7, patience=3, verbose=1)
+
+  # Обучение/дообучение модели
+
+  history = model.fit(x_train, y_train,
+                      epochs=100, initial_epoch = 0, batch_size=32,
+                      validation_data=(x_val, y_val),
+                      callbacks=[model_Checkpoint, reduceLROnPlateau])
+
+  # Отображение графиков обучения
+  graph (history)
+
+  return model_seq
+
+# Получение максимальных и минимальных значений координат отверстия по горизонтальной и вертикальной осям соответственно
+def coord_cl(classi1, classi2):
+  minX=min(classi1)
+  maxX=max(classi1)
+  minY=min(classi2)
+  maxY=max(classi2)
+  coord=minX,maxX,minY,maxY
+  return coord
+
+# Функция предсказания, кластеризации и вывода изображений и границ пробоин
+def prediction (model, x_val, val_segments, val_images, indexes=None, count=1):
+    if indexes is None:
+      # Генерация случайного списка индексов в количестве count между (0, len(x_val)
+      indexes = np.random.randint(0, len(x_val), count)
+    else:
+      count = len(indexes)
+    XX=model.predict(x_val[indexes])
+    fig, axs = plt.subplots(3, count, figsize=(25, 10))
+    # Отрисовка результата работы модели
+    for i in range(count):
+        # Отображение на графике в первой линии предсказания модели
+        axs[0, 0].set_title('Результат работы модели:')
+        axs[0, i].imshow(XX[i])
+        proboini=[]
+        for a in range(0,208):
+          for b in range(0,208):
+            if XX[i,a,b,0]>0.2:
+              c=[]
+              c.append(a)
+              c.append(b)
+              proboini.append(c)
+        proboini=np.array(proboini)
+        # Создание модели алгоритма K-Means для деления на пять кластеров по количеству пробоин
+        model_KM = KMeans(n_clusters=5, n_init = 10)
+
+        # Вычисление кластеризации
+        model_KM.fit(proboini)
+
+        # Результат кластеризации
+        predictions = model_KM.predict(proboini)
+        classi1x, classi1y, classi2x, classi2y, classi3x, classi3y, classi4x, classi4y, classi5x, classi5y, borders=[]
+        for j in range(0, len(predictions)):
+          if predictions[j]==0:
+            classi1x.append(proboini[j,0])
+            classi1y.append(proboini[j,1])
+          if predictions[j]==1:
+            classi2x.append(proboini[j,0])
+            classi2y.append(proboini[j,1])
+          if predictions[j]==2:
+            classi3x.append(proboini[j,0])
+            classi3y.append(proboini[j,1])
+          if predictions[j]==3:
+            classi4x.append(proboini[j,0])
+            classi4y.append(proboini[j,1])
+          if predictions[j]==4:
+            classi5x.append(proboini[j,0])
+            classi5y.append(proboini[j,1])
+
+        borders.append(coord_cl(classi1x, classi1y))
+        borders.append(coord_cl(classi2x, classi2y))
+        borders.append(coord_cl(classi3x, classi3y))
+        borders.append(coord_cl(classi4x, classi4y))
+        borders.append(coord_cl(classi5x, classi5y))
+        # Вывод границ пробоин
+        axs[1, i].add_patch(patches.Rectangle((int(borders[0][2]), int(borders[0][0])),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[1, i].add_patch(patches.Rectangle((int(borders[1][2]), int(borders[1][0])),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[1, i].add_patch(patches.Rectangle((int(borders[2][2]), int(borders[2][0])),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[1, i].add_patch(patches.Rectangle((int(borders[3][2]), int(borders[3][0])),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[1, i].add_patch(patches.Rectangle((int(borders[4][2]), int(borders[4][0])),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[0, i].axis('off')
+
+        # Отображение на графике во второй линии сегментированного изображения из y_val
+        axs[1, 0].set_title('Оригинальное сегментированное')
+        axs[1, i].imshow(val_segments[indexes[i]])
+        axs[1 ,i].axis('off')
+
+        # Отображение на графике в третьей линии оригинального изображения
+        axs[2, 0].set_title('Оригинальное изображение. Средняя точка попадания показана красным кружком')
+        axs[2, i].imshow(val_images[indexes[i]])
+        img_coord=borders
+        img_coord=np.asarray(img_coord)
+        # вычисляем и отображаем среднюю точку попадания (на мишени круг красного цвета)
+        x_stp=np.sum(img_coord[:,0])/len(img_coord[:,0])+5
+        y_stp=np.sum(img_coord[:,2])/len(img_coord[:,2])+5
+        axs[2, i].add_patch(patches.Circle ((y_stp, x_stp), radius= 3, color='red' ))
+        # вычисляем и отображаем среднеквадратическое отклонение для каждой мишени
+        sko_x= np.std(img_coord[:,0])
+        sko_y= np.std(img_coord[:,2])
+        sko=(sko_x+sko_y)/2
+        i0=i+1
+        print('Среднеквадратическое отклонение',i0, "-й мишени:", sko)
+        for e in range(0, 5):
+          prom=img_coord[e]
+          minX=prom[0]
+          minY=prom[2]
+          axs[2, i].add_patch(patches.Rectangle((int(minY), int(minX)),10,10, edgecolor = 'blue', facecolor = 'red', fill=False ) )
+        axs[2 ,i].axis('off')
+
+    plt.show()
+
+# Головная функция программы
+
+def process_images(model,                       # модель
+                   path_img=path, # Путь к папке с обрабатываемыми изображениями:
+                   path_weight=weights_path,  # путь к файлу весов модели
+                   count=1,                     # количество случайных картинок для сегментации
+                   indexes=None,                # список индексов изображений в проверочной выборке
+                                  ):
+    # Загрузка данных
+    train_images, val_images, train_segments, val_segments = download_func(path_img)
+
+    # Формирование обучающей выборки
+    x_train, y_train=train_vyb(train_images, train_segments)
+    # Формирование проверочной выборки
+    x_val, y_val=test_vyb(val_images, val_segments)
+
+    # Создание модели, загрузка весов и обучение с выводом графиков
+    model_seq = create_model (model, x_train, y_train, x_val, y_val, weights_path)
+
+    # Предсказание, кластеризация и вывод изображений и границ пробоин
+    prediction (model_seq, x_val, val_segments, val_images, indexes, count)
+
+# Тестовая ячейка. Отображение результатов работы модели
+# Введите в переменную input число случайно выбираемых изображений для расчета из Вашего набора данных:
+input=5
+# Введите интересующую модель нейросети, путь к папке с обрабатываемыми изображениями и путь к файлу весов
+process_images(sequential_segmentation_net4(IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS), path, weights_path, input)
